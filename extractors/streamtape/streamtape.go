@@ -1,53 +1,55 @@
 package streamtape
 
 import (
-	"regexp"
-	"strings"
+	"fmt"
 
-	"github.com/iawia002/annie/extractors/types"
-	"github.com/iawia002/annie/request"
-	"github.com/iawia002/annie/utils"
+	"github.com/pkg/errors"
+	"github.com/robertkrimen/otto"
+
+	"github.com/iawia002/lux/extractors"
+	"github.com/iawia002/lux/request"
+	"github.com/iawia002/lux/utils"
 )
 
-const prefix = "document.getElementById('robotlink').innerHTML = '"
-
-var pattern = regexp.MustCompile(`\((.*?)\)`)
+func init() {
+	e := New()
+	extractors.Register("streamtape", e)
+	extractors.Register("streamta", e) // streamta.pe
+}
 
 type extractor struct{}
 
 // New returns a StreamTape extractor
-func New() types.Extractor {
+func New() extractors.Extractor {
 	return &extractor{}
 }
 
 // Extract is the main function to extract the data.
-func (e *extractor) Extract(url string, _ types.Options) ([]*types.Data, error) {
+func (e *extractor) Extract(url string, _ extractors.Options) ([]*extractors.Data, error) {
 	html, err := request.Get(url, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 
-	var u string
-	for _, line := range strings.Split(html, "\n") {
-		if !strings.HasPrefix(line, prefix) {
-			continue
-		}
-		start := line[len(prefix):]
-
-		domain := "https:" + start[:strings.Index(start, "'")]
-		paramsMatches := pattern.FindAllStringSubmatch(start, -1)
-		if len(paramsMatches) < 2 {
-			return nil, types.ErrURLParseFailed
-		}
-		params := paramsMatches[0][1]
-		params = params[1 : len(params)-1]
-
-		u = domain + params[3:] + "&stream=1"
-		break
+	scripts := utils.MatchOneOf(html, `document.getElementById\('norobotlink'\).innerHTML = (.+?);`)
+	if len(scripts) < 2 {
+		return nil, errors.WithStack(extractors.ErrURLParseFailed)
 	}
-	if u == "" {
-		return nil, types.ErrURLParseFailed
+
+	vm := otto.New()
+	_, err = vm.Run(fmt.Sprintf("var __VM__OUTPUT = %s", scripts[1]))
+	if err != nil {
+		return nil, errors.WithStack(err)
 	}
+	value, err := vm.Get("__VM__OUTPUT")
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	u, err := value.ToString() // //streamtape.com/get_video?id=xx&expires=xx&ip=xx&token=xx
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	u = fmt.Sprintf("https:%s&stream=1", u)
 
 	// get title
 	var title = "StreamTape Video"
@@ -59,27 +61,27 @@ func (e *extractor) Extract(url string, _ types.Options) ([]*types.Data, error) 
 
 	size, err := request.Size(u, url)
 	if err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 
-	urlData := &types.Part{
+	urlData := &extractors.Part{
 		URL:  u,
 		Size: size,
 		Ext:  "mp4",
 	}
 
-	streams := make(map[string]*types.Stream)
-	streams["default"] = &types.Stream{
-		Parts: []*types.Part{urlData},
+	streams := make(map[string]*extractors.Stream)
+	streams["default"] = &extractors.Stream{
+		Parts: []*extractors.Part{urlData},
 		Size:  size,
 	}
 
-	return []*types.Data{
+	return []*extractors.Data{
 		{
 			URL:     u,
 			Site:    "StreamTape streamtape.com",
 			Title:   title,
-			Type:    types.DataTypeVideo,
+			Type:    extractors.DataTypeVideo,
 			Streams: streams,
 		},
 	}, nil
